@@ -1,9 +1,10 @@
 """Transcribe a video with AssemblyAI.
 
 Extracts mono 16kHz audio via ffmpeg, uploads to AssemblyAI with
-speaker diarization + word-level timestamps, normalizes the response
-to the same JSON shape the rest of the pipeline expects, and writes
-it to <edit_dir>/transcripts/<video_stem>.json.
+speaker diarization + word-level timestamps + disfluencies (um/uh/restarts
+kept as words so they remain cuttable), normalizes the response to the same
+JSON shape the rest of the pipeline expects, and writes it to
+<edit_dir>/transcripts/<video_stem>.json.
 
 Output JSON shape (compatible with pack_transcripts.py and render.py):
   {
@@ -92,6 +93,7 @@ def _submit(
         "audio_url": upload_url,
         "speech_models": ["universal-3-pro"],
         "speaker_labels": True,
+        "disfluencies": True,  # keep um/uh/restarts as words so they're cuttable
     }
     if language:
         body["language_code"] = language

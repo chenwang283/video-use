@@ -31,6 +31,8 @@ These are the things where deviation produces silent failures or broken output. 
 10. **Parallel sub-agents for multiple animations.** Never sequential. Spawn N at once via the `Agent` tool; total wall time ≈ slowest one.
 11. **Strategy confirmation before execution.** Never touch the cut until the user has approved the plain-English plan.
 12. **All session outputs in `<videos_dir>/edit/`.** Never write inside the `video-use/` project directory.
+13. **Intra-phrase cuts resolve at word level.** Any cut edge that does not fall on a phrase boundary (stutters, fillers, doubled words, mid-sentence corrections) must be taken from `transcripts/<name>.json` word timestamps, not interpolated from the packed phrase range. The packed view locates the edit; word timestamps place the edge.
+14. **Cut in silence or declare a hard splice.** Place every cut edge in a silence gap. If the required edge sits where the adjacent inter-word gap is < 150ms (continuous speech — common for stutters, filler, doubled words), it is a HARD SPLICE: it cannot be clean from timestamps alone. A hard splice REQUIRES (a) a longer audio crossfade (≥60ms), not the default 30ms fade, and (b) verification via `check_cuts.py`. When removing a word, pad edges toward swallowing the removed word, never toward kept content.
 
 Everything else in this document is a worked example. Deviate whenever the material calls for it.
 
@@ -77,6 +79,7 @@ Helpers (`helpers/transcribe.py`, `helpers/render.py`, etc.) live alongside this
 - **`timeline_view.py <video> <start> <end>`** — filmstrip + waveform PNG. On-demand visual drill-down. **Not a scan tool** — use it at decision points, not constantly.
 - **`render.py <edl.json> -o <out>`** — per-segment extract → concat → overlays (PTS-shifted) → subtitles LAST. `--preview` for 720p fast. `--build-subtitles` to generate master.srt inline.
 - **`grade.py <in> -o <out>`** — ffmpeg filter chain grade. Presets + `--filter '<raw>'` for custom.
+- **`check_cuts.py <edl.json>`** — measures audio energy at every cut edge against an adaptive noise floor; flags edges that land in speech (residue/clip risk / hard splices). The verification "ear" — catches what a waveform PNG cannot.
 
 For animations, create `<edit>/animations/slot_<id>/` with `Bash` and spawn a sub-agent via the `Agent` tool.
 
@@ -88,7 +91,7 @@ For animations, create `<edit>/animations/slot_<id>/` with `Bash` and spawn a su
 4. **Propose strategy.** 4–8 sentences: shape, take choices, cut direction, animation plan, grade direction, subtitle style, length estimate. **Wait for confirmation.**
 5. **Execute.** Produce `edl.json` via the editor sub-agent brief. Drill into `timeline_view` at ambiguous moments. Build animations in parallel sub-agents. Apply grade per-segment. Compose via `render.py`.
 6. **Preview.** `render.py --preview`.
-7. **Self-eval (before showing the user).** Run `timeline_view` on the **rendered output** (not the sources) at every cut boundary (±1.5s window). Check each image for:
+7. **Self-eval (before showing the user).** First run `check_cuts.py <edl.json>` — it catches audible residue and mid-word edges (hard splices) that a waveform PNG cannot show. Any flagged edge must be re-snapped to silence or given a ≥60ms crossfade, then re-checked. (The agent cannot literally hear audio; this is the objective proxy. The final subjective listen is the human's.) Then run `timeline_view` on the **rendered output** (not the sources) at every cut boundary (±1.5s window). Check each image for:
    - Visual discontinuity / flash / jump at the cut
    - Waveform spike at the boundary (audio pop that slipped past the 30ms fade)
    - Subtitle hidden behind an overlay (Rule 1 violation)
@@ -108,10 +111,13 @@ For animations, create `<edit>/animations/slot_<id>/` with `Bash` and spawn a su
 - **Silence gaps are cut candidates.** Silences ≥400ms are usually the cleanest. 150–400ms phrase boundaries are usable with a visual check. <150ms is unsafe (mid-phrase).
 - **Example cut padding** (the launch video shipped with this): 50ms before the first kept word, 80ms after the last. Tighter for montage energy, looser for documentary. Stay in the 30–200ms working window (Hard Rule 7).
 - **Never reason audio and video independently.** Every cut must work on both tracks.
+- **Intra-phrase edits (stutters, fillers, doubled words, mid-sentence corrections, tics, bleeps).** These all share one shape: the unit is smaller than a phrase and usually sits in zero-gap speech. Protocol: (1) pull the word window from `transcripts/<name>.json`; (2) compute inter-word gaps; (3) snap each edge to the nearest gap ≥150ms; (4) if none exists, treat as a hard splice (Hard Rule 14 — ≥60ms crossfade); (5) verify with `check_cuts.py`. This one protocol covers the entire class — do not special-case each type.
 
 ## The packed transcript (primary reading view)
 
-`pack_transcripts.py` reads all `transcripts/*.json` and produces one markdown file where each take is a list of phrase-level lines, each prefixed with its `[start-end]` time range. Phrases break on any silence ≥ 0.5s OR speaker change. This is the artifact the editor sub-agent reads to pick cuts — it gives word-boundary precision from text alone at 1/10 the tokens of raw JSON.
+`pack_transcripts.py` reads all `transcripts/*.json` and produces one markdown file where each take is a list of phrase-level lines, each prefixed with its `[start-end]` time range. Phrases break on any silence ≥ 0.5s OR speaker change. This is the artifact the editor sub-agent reads to LOCATE cuts and choose takes — NOT to place cut edges. Phrase ranges tell you WHERE to edit; they do not carry per-word times or inter-word gaps. Any cut whose edge falls INSIDE a phrase (stutter, filler, doubled word, mid-sentence correction) MUST be resolved against the word-level JSON in `transcripts/<name>.json` before it goes in the EDL. Locate in the packed view; place edges from word timestamps.
+
+Phrases that contain restarts (`—`), doubled words, or sub-phrase pauses get a `↳ word-level pass` annotation listing clean cut points — the cue to zoom into the word-level JSON.
 
 Example line:
 ```
@@ -147,6 +153,9 @@ Common structural archetypes (pick, adapt, or invent):
 
 RULES:
   - Start/end times must fall on word boundaries from the transcript.
+  - For any edit INSIDE a phrase (stutter/filler/repeat/correction), open the
+    word-level JSON and place edges from word start/end times — never estimate
+    intra-phrase edges from the packed phrase range.
   - Pad cut boundaries (working window 30–200ms).
   - Prefer silences ≥ 400ms as cut targets.
   - Unavoidable slips are kept if no better take exists. Note them in "reason".

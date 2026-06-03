@@ -35,6 +35,31 @@ def format_duration(seconds: float) -> str:
     return f"{m}m {s:04.1f}s"
 
 
+def analyze_phrase(words: list[dict], micro_min: float = 0.15, micro_max: float = 0.5):
+    """Objective sub-phrase signals: cut-candidate pauses, restarts, repeats.
+
+    Returns (sub_pauses, repeated, restart):
+      - sub_pauses: list of times (prev word end) where the inter-word gap is in
+        [micro_min, micro_max) — clean cut points hiding inside the phrase.
+      - repeated: True if any two adjacent words are the same token.
+      - restart: True if any word carries an em-dash (ASR's false-start marker).
+    Pure measurement + literal text equality — no editorial scoring.
+    """
+    def norm(s: str | None) -> str:
+        return (s or "").strip().strip(".,?!—").lower()
+
+    pauses: list[float] = []
+    repeated = False
+    for i in range(1, len(words)):
+        pe, cs = words[i - 1].get("end"), words[i].get("start")
+        if pe is not None and cs is not None and micro_min <= (cs - pe) < micro_max:
+            pauses.append(round(pe, 2))
+        if norm(words[i - 1].get("text")) and norm(words[i - 1].get("text")) == norm(words[i].get("text")):
+            repeated = True
+    restart = any("—" in (w.get("text") or "") for w in words)
+    return pauses, repeated, restart
+
+
 def group_into_phrases(
     words: list[dict],
     silence_threshold: float = 0.5,
@@ -73,11 +98,15 @@ def group_into_phrases(
         text = " ".join(text_parts)
         text = text.replace(" ,", ",").replace(" .", ".").replace(" ?", "?").replace(" !", "!")
         end_time = current_words[-1].get("end", current_words[-1].get("start", current_start or 0.0))
+        sub_pauses, repeated, restart = analyze_phrase(current_words)
         phrases.append({
             "start": current_start,
             "end": end_time,
             "text": text,
             "speaker_id": current_speaker,
+            "sub_pauses": sub_pauses,
+            "repeated": repeated,
+            "restart": restart,
         })
         current_words = []
         current_start = None
@@ -158,6 +187,13 @@ def render_markdown(entries: list[tuple[str, float, list[dict]]], silence_thresh
             else:
                 spk_tag = ""
             lines.append(f"  [{format_time(p['start'])}-{format_time(p['end'])}]{spk_tag} {p['text']}")
+            if p.get("restart") or p.get("repeated"):
+                why = ", ".join(
+                    (["restart(—)"] if p.get("restart") else [])
+                    + (["repeat"] if p.get("repeated") else [])
+                )
+                cuts = ", ".join(f"{t:.2f}" for t in p.get("sub_pauses", [])) or "none — hard splice"
+                lines.append(f"      ↳ word-level pass [{why}]; clean cut points: {cuts}")
         lines.append("")
     return "\n".join(lines)
 
