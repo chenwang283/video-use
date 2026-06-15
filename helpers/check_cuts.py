@@ -81,34 +81,51 @@ def main() -> None:
         sys.exit("edl has no ranges")
 
     cache: dict[str, tuple[np.ndarray, int, float]] = {}
-    flags: list[tuple[str, str, float, float, float]] = []
+    # CLIP = a *clean* cut (small/no fade) that landed in speech → a kept word is
+    #        being cut mid-sound (the 's' off "tasks", "deadline" cut short).
+    # SPLICE = a cut the EDL marked hard (larger fade) that sits in speech →
+    #          intended continuous-speech rejoin; just verify it sounds clean.
+    # (We classify by the EDL fade, NOT by ASR word times — those are unreliable.)
+    clips: list[tuple[str, str, float, float]] = []
+    splices: list[tuple[str, str, float, float]] = []
     checked = 0
+    HARD_FADE_MIN = 0.02   # fades >= this mark an intentional hard splice
 
     for r in ranges:
         src_key = r["source"]
         src = Path(sources[src_key])
         if src_key not in cache:
             pcm = load_pcm(src)
-            sr = 16000
-            cache[src_key] = (pcm, sr, noise_floor(pcm, sr, args.margin))
+            cache[src_key] = (pcm, 16000, noise_floor(pcm, 16000, args.margin))
         pcm, sr, thr = cache[src_key]
         if pcm.size == 0:
             continue
-        for label, t in (("start", float(r["start"])), ("end", float(r["end"]))):
+        fin = float(r.get("fade_in", 0.0)); fout = float(r.get("fade_out", 0.0))
+        for label, t, fade in (("start", float(r["start"]), fin),
+                               ("end", float(r["end"]), fout)):
             checked += 1
             e = edge_rms(pcm, sr, t, args.half)
             if e > thr:
-                flags.append((src_key, label, t, round(e, 4), round(thr, 4)))
+                (splices if fade >= HARD_FADE_MIN else clips).append(
+                    (src_key, label, t, round(e, 4)))
 
     print(f"checked {checked} cut edge(s) across {len(cache)} source(s)")
-    if not flags:
+    if clips:
+        print(f"\n{len(clips)} WORD-CLIP edge(s) — a CLEAN cut landed in speech "
+              f"(a kept word is cut mid-sound, e.g. an 's' or the word's tail):")
+        for s, lab, t, e in clips:
+            print(f"  {s} {lab}={t:.3f}s  rms={e}"
+                  f"   → re-place this edge in the surrounding silence (place_edges.py"
+                  f" extends to the word's audio extent + pad); re-check")
+    if splices:
+        print(f"\n{len(splices)} HARD-SPLICE edge(s) — intended mid-speech rejoin; "
+              f"confirm it sounds clean (≥60ms crossfade if it pops):")
+        for s, lab, t, e in splices:
+            print(f"  {s} {lab}={t:.3f}s  rms={e}")
+    if not clips and not splices:
         print("OK — all cut edges land in silence.")
         return
-    print(f"\n{len(flags)} HARD-SPLICE edge(s) — edge sits in speech (residue/clip risk):")
-    for s, lab, t, e, thr in flags:
-        print(f"  {s} {lab}={t:.3f}s  rms={e} > floor {thr}"
-              f"   → snap to nearest trough or add ≥60ms crossfade, then re-check")
-    sys.exit(1)
+    sys.exit(1 if clips else 0)   # only fail the check on real clips
 
 
 if __name__ == "__main__":
